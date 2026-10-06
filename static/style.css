@@ -175,3 +175,15 @@ details.rev summary { cursor: pointer; color: var(--accent); font-size: 13px; wh
 .form-actions { display: flex; gap: 10px; align-items: center; }
 
 .deletion-log .reasons ul { margin-top: 4px; padding-left: 6px; }
+
+/* 交接版 */
+.badge.add { background: #dbeafe; color: #1d4ed8; }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.muted { background: #f3f4f6; color: var(--muted); }
+.change-list { margin: 4px 0 0; padding-left: 16px; font-size: 12.5px; color: var(--warn); }
+.change-list li { margin-bottom: 2px; }
+tr.removed td { background: #f9fafb; }
+tr.removed td > * { opacity: .72; }
+.release-panel h2 .badge { vertical-align: middle; }
+.release-diff { min-width: 90px; }
+.ops .btn { margin-right: 4px; }

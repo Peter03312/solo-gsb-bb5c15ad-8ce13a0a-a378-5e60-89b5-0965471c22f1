@@ -74,6 +74,26 @@ CREATE TABLE IF NOT EXISTS cleaning_deletion (
     deleted_at TEXT NOT NULL,
     affected TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS release_version (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version INTEGER NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    batch_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS release_item (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id INTEGER NOT NULL REFERENCES release_version(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    batch_id INTEGER,
+    batch_name TEXT NOT NULL DEFAULT '',
+    allergens TEXT NOT NULL DEFAULT '',
+    equipment_names TEXT NOT NULL DEFAULT '',
+    planned_start TEXT NOT NULL DEFAULT '',
+    planned_end TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'accepted',
+    risks TEXT NOT NULL DEFAULT '[]',
+    revision_note TEXT NOT NULL DEFAULT ''
+);
 """
 
 app = Flask(__name__)
@@ -84,7 +104,8 @@ app.secret_key = os.environ.get("SECRET_KEY", "allergen-scheduler-dev-key")
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        # timeout：发布交接版等写事务遇锁时最多等待 10 秒，避免并发下立即报错
+        g.db = sqlite3.connect(DB_PATH, timeout=10)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
@@ -400,12 +421,19 @@ def inject_globals():
 
 @app.route("/")
 def index():
-    results = compute_schedule(get_db())
+    conn = get_db()
+    results = compute_schedule(conn)
     accepted = sum(1 for r in results if r["status"] == "accepted")
+    latest = latest_release(conn)
+    items = release_items(conn, latest["id"]) if latest else []
+    diff, removed_ids = (diff_against_release(results, items)
+                         if latest else ({}, set()))
     return render_template("index.html", results=results,
                            accepted=accepted,
                            blocked_count=len(results) - accepted,
-                           cleaning_deletions=cleaning_deletion_rows(get_db()))
+                           cleaning_deletions=cleaning_deletion_rows(conn),
+                           latest_release=latest, release_items=items,
+                           release_diff=diff, removed_ids=removed_ids)
 
 
 @app.post("/recalculate")
@@ -763,6 +791,288 @@ def export_cleaning_deletions_json():
                     mimetype="application/json; charset=utf-8",
                     headers={"Content-Disposition":
                              "attachment; filename=cleaning_deletions.json"})
+
+
+# ---------------------------------------------------------------- 生产交接版
+
+def risk_snapshot(risk):
+    """把排程结果中的一条风险记录转为可 JSON 保存的快照（含所用清洁）。"""
+    snap = {
+        "equipment": risk["equipment"],
+        "from_batch": risk["from_batch"],
+        "residual": list(risk["residual"]),
+        "new_risks": list(risk["new_risks"]),
+        "level": risk["level"],
+        "block_reason": risk["block_reason"],
+        "cleaning": None,
+    }
+    c = risk.get("cleaning")
+    if c:
+        snap["cleaning"] = {
+            "id": c["id"],
+            "cleaned_at": c["cleaned_at"],
+            "valid_until": c["valid_until"],
+            "covers": c["covers"],
+        }
+    return snap
+
+
+def latest_release(conn):
+    return conn.execute(
+        "SELECT * FROM release_version ORDER BY version DESC LIMIT 1").fetchone()
+
+
+def release_items(conn, release_id):
+    """读取某交接版的批次快照（按发布时顺序），risks 解析为列表。"""
+    items = []
+    for r in conn.execute(
+            "SELECT * FROM release_item WHERE release_id=? ORDER BY position",
+            (release_id,)):
+        d = dict(r)
+        try:
+            d["risks"] = json.loads(d.get("risks") or "[]")
+        except (TypeError, ValueError):
+            d["risks"] = []
+        items.append(d)
+    return items
+
+
+def risk_fingerprint(risks):
+    """风险来源 / 所用清洁内容的规范化指纹，用于对比交接版与实时排程。"""
+    parts = []
+    for risk in risks or []:
+        c = risk.get("cleaning") or {}
+        parts.append("|".join([
+            risk.get("equipment", ""),
+            risk.get("from_batch", ""),
+            ",".join(risk.get("residual") or []),
+            ",".join(risk.get("new_risks") or []),
+            risk.get("level") or "",
+            str(c.get("id") or ""),
+            c.get("cleaned_at") or "",
+            c.get("valid_until") or "",
+            c.get("covers") or "",
+        ]))
+    return parts
+
+
+def diff_against_release(results, items):
+    """把实时排程结果与交接版快照按批次对比。
+
+    返回 (diff, removed_ids)：
+    diff[batch_id] = {"state": "added"|"changed"|"same", "changes": [说明...]}；
+    removed_ids 为交接版中已不在当前排程里的批次 id（已移除）。
+    """
+    by_bid = {it["batch_id"]: it for it in items}
+    cur_ids = {r["id"] for r in results}
+    status_text = {"accepted": "已排入", "blocked": "已拒绝"}
+    diff = {}
+    for i, r in enumerate(results, 1):
+        it = by_bid.get(r["id"])
+        if it is None:
+            diff[r["id"]] = {"state": "added",
+                             "changes": ["交接版发布后新增的批次"]}
+            continue
+        changes = []
+        if r["name"] != it["batch_name"]:
+            changes.append(f"名称：{it['batch_name']} → {r['name']}")
+        cur_alg = "、".join(r["allergens"])
+        if cur_alg != (it["allergens"] or ""):
+            changes.append(f"过敏原：{it['allergens'] or '无'} → {cur_alg or '无'}")
+        cur_eq = "、".join(r["equipment_names"])
+        if cur_eq != (it["equipment_names"] or ""):
+            changes.append(f"器具：{it['equipment_names'] or '—'} → {cur_eq or '—'}")
+        cur_start = r["start"].isoformat(timespec="minutes") if r["start"] else ""
+        cur_end = r["end"].isoformat(timespec="minutes") if r["end"] else ""
+        if cur_start != it["planned_start"] or cur_end != it["planned_end"]:
+            fmt = lambda s: (s or "").replace("T", " ") or "—"  # noqa: E731
+            changes.append(f"时段：{fmt(it['planned_start'])} ~ {fmt(it['planned_end'])}"
+                           f" → {fmt(cur_start)} ~ {fmt(cur_end)}")
+        if r["status"] != it["status"]:
+            changes.append(f"状态：{status_text.get(it['status'], it['status'])}"
+                           f" → {status_text.get(r['status'], r['status'])}")
+        if i != it["position"]:
+            changes.append(f"顺序：第 {it['position']} 位 → 第 {i} 位")
+        if risk_fingerprint(r["risks"]) != risk_fingerprint(it["risks"]):
+            changes.append("风险来源 / 所用清洁发生变化")
+        diff[r["id"]] = {"state": "changed" if changes else "same",
+                         "changes": changes}
+    removed_ids = {it["batch_id"] for it in items if it["batch_id"] not in cur_ids}
+    return diff, removed_ids
+
+
+@app.post("/releases/publish")
+def publish_release():
+    """把当前排程发布为可追溯的生产交接版。
+
+    在 BEGIN IMMEDIATE 事务内按现有器具占用、过敏原与清洁规则重新计算，
+    并在同一事务内写入连续版本号与按顺序排列的批次快照：计算所依据的
+    批次/器具/清洁数据与落库内容处于同一事务，并发修改只能排在事务之前
+    或之后，不会造成版本内容与判定依据不一致；版本号在写锁保护下取
+    MAX(version)+1，唯一约束兜底，保证连续不重复。
+    没有批次或存在阻塞批次时回滚，不生成版本。
+    """
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        flash("系统正忙，请稍后重试发布交接版", "error")
+        return redirect(url_for("index"))
+    try:
+        results = compute_schedule(conn)
+        if not results:
+            conn.rollback()
+            flash("未发布交接版：当前没有任何批次，无可交接的排程内容", "error")
+            return redirect(url_for("index"))
+        blocked = [r for r in results if r["status"] != "accepted"]
+        if blocked:
+            conn.rollback()
+            parts = []
+            for r in blocked:
+                reason = "；".join(r["blocks"]) if r["blocks"] else "未能排入"
+                parts.append(f"「{r['name']}」（{reason}）")
+            flash(f"未发布交接版：{len(blocked)} 个批次处于阻塞状态——"
+                  + "、".join(parts)
+                  + "。请先调整顺序、补登清洁或修订批次后再发布。", "error")
+            return redirect(url_for("index"))
+        version = conn.execute(
+            "SELECT COALESCE(MAX(version),0)+1 AS v FROM release_version"
+        ).fetchone()["v"]
+        created_at = datetime.now().isoformat(timespec="seconds")
+        cur = conn.execute(
+            "INSERT INTO release_version(version, created_at, batch_count)"
+            " VALUES (?,?,?)", (version, created_at, len(results)))
+        release_id = cur.lastrowid
+        for i, r in enumerate(results, 1):
+            conn.execute(
+                "INSERT INTO release_item(release_id, position, batch_id,"
+                " batch_name, allergens, equipment_names, planned_start,"
+                " planned_end, status, risks, revision_note)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (release_id, i, r["id"], r["name"],
+                 "、".join(r["allergens"]),
+                 "、".join(r["equipment_names"]),
+                 r["start"].isoformat(timespec="minutes") if r["start"] else "",
+                 r["end"].isoformat(timespec="minutes") if r["end"] else "",
+                 r["status"],
+                 json.dumps([risk_snapshot(risk) for risk in r["risks"]],
+                            ensure_ascii=False),
+                 revision_note_text(r.get("latest_revision"))))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    flash(f"交接版 v{version} 已发布：{len(results)} 个批次（发布时全部已排入）"
+          f"已按当前规则快照存档，历史版本不随后续修改变化", "ok")
+    return redirect(url_for("release_detail", version=version))
+
+
+@app.route("/releases")
+def releases():
+    rows = get_db().execute(
+        "SELECT * FROM release_version ORDER BY version DESC").fetchall()
+    return render_template("releases.html", releases=rows)
+
+
+@app.route("/releases/<int:version>")
+def release_detail(version):
+    conn = get_db()
+    rel = conn.execute(
+        "SELECT * FROM release_version WHERE version=?", (version,)).fetchone()
+    if rel is None:
+        flash(f"交接版 v{version} 不存在", "error")
+        return redirect(url_for("releases"))
+    return render_template("release_detail.html", rel=rel,
+                           items=release_items(conn, rel["id"]))
+
+
+def release_export_rows(items):
+    """把交接版快照展开为可导出的行（列结构与实时导出一致）。"""
+    rows = []
+    for it in items:
+        base = {
+            "order": it["position"],
+            "batch": it["batch_name"],
+            "allergens": it["allergens"],
+            "equipment": it["equipment_names"],
+            "planned_start": it["planned_start"],
+            "planned_end": it["planned_end"],
+            "status": "已排入" if it["status"] == "accepted" else "已拒绝",
+        }
+        note = it.get("revision_note") or ""
+        if it["risks"]:
+            for risk in it["risks"]:
+                row = dict(base)
+                row["risk_source"] = risk_source_text(risk)
+                row["action"] = risk_action_text(risk)
+                if note:
+                    row["action"] = f"{row['action']}；{note}"
+                rows.append(row)
+        else:
+            base["risk_source"] = "无前置残留" if it["status"] == "accepted" else "—"
+            base["action"] = note or "无交叉污染风险"
+            rows.append(base)
+    return rows
+
+
+def get_release_or_redirect(conn, version):
+    return conn.execute(
+        "SELECT * FROM release_version WHERE version=?", (version,)).fetchone()
+
+
+@app.route("/releases/<int:version>.csv")
+def release_export_csv(version):
+    conn = get_db()
+    rel = get_release_or_redirect(conn, version)
+    if rel is None:
+        flash(f"交接版 v{version} 不存在", "error")
+        return redirect(url_for("releases"))
+    out = io.StringIO()
+    out.write("﻿")  # BOM，便于 Excel 识别中文
+    w = csv.writer(out)
+    w.writerow(["顺序", "批次", "本批次过敏原", "使用器具", "计划开始", "计划结束",
+                "状态", "风险来源", "处置 / 阻塞原因"])
+    for row in release_export_rows(release_items(conn, rel["id"])):
+        w.writerow([row["order"], row["batch"], row["allergens"],
+                    row["equipment"], row["planned_start"],
+                    row["planned_end"], row["status"],
+                    row["risk_source"], row["action"]])
+    return Response(out.getvalue(), mimetype="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=handover_v{version}.csv"})
+
+
+@app.route("/releases/<int:version>.json")
+def release_export_json(version):
+    conn = get_db()
+    rel = get_release_or_redirect(conn, version)
+    if rel is None:
+        flash(f"交接版 v{version} 不存在", "error")
+        return redirect(url_for("releases"))
+    items = release_items(conn, rel["id"])
+    payload = {
+        "version": rel["version"],
+        "created_at": rel["created_at"],
+        "batch_count": rel["batch_count"],
+        "app_url": APP_URL,
+        "schedule": release_export_rows(items),
+        "snapshot": [{
+            "position": it["position"],
+            "batch_id": it["batch_id"],
+            "batch": it["batch_name"],
+            "allergens": [a for a in it["allergens"].split("、") if a],
+            "equipment": [e for e in it["equipment_names"].split("、") if e],
+            "planned_start": it["planned_start"],
+            "planned_end": it["planned_end"],
+            "status": it["status"],
+            "risks": it["risks"],
+            "revision_note": it["revision_note"],
+        } for it in items],
+    }
+    return Response(json.dumps(payload, ensure_ascii=False, indent=2),
+                    mimetype="application/json; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=handover_v{version}.json"})
 
 
 # ---------------------------------------------------------------- 启动

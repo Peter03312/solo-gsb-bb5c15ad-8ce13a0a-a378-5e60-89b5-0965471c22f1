@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}交接版 v{{ rel.version }} · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>交接版 v{{ rel.version }}</h2>
+  <p class="hint">
+    发布于 {{ rel.created_at.replace('T', ' ') }} · 共 {{ rel.batch_count }} 个批次（发布时全部已排入）。
+    本页为发布时的快照，按原样保存批次、器具、时段、过敏原、风险来源、所用清洁及状态，
+    不随后续批次 / 器具 / 清洁记录的修改或删除变化。
+  </p>
+  <div class="toolbar">
+    <a class="btn ghost" href="{{ url_for('release_export_csv', version=rel.version) }}">⬇ 导出本版 CSV</a>
+    <a class="btn ghost" href="{{ url_for('release_export_json', version=rel.version) }}">⬇ 导出本版 JSON</a>
+    <a class="btn ghost" href="{{ url_for('releases') }}">全部版本</a>
+    <a class="btn ghost" href="{{ url_for('index') }}">返回看板</a>
+  </div>
+  <table>
+    <thead>
+      <tr><th>#</th><th>批次 / 过敏原</th><th>器具</th><th>预计时段</th>
+        <th>状态</th><th>风险来源与所用清洁</th></tr>
+    </thead>
+    <tbody>
+    {% for it in items %}
+      <tr>
+        <td>{{ it.position }}</td>
+        <td>
+          <strong>{{ it.batch_name }}</strong><br>
+          <span class="tags">
+            {% for a in it.allergens.split('、') if a %}<span class="tag">{{ a }}</span>
+            {% else %}<span class="tag none">无过敏原</span>{% endfor %}
+          </span>
+        </td>
+        <td>{{ it.equipment_names or '—' }}</td>
+        <td class="time">
+          {% if it.planned_start %}{{ it.planned_start.replace('T', ' ') }} ~ {{ it.planned_end.replace('T', ' ') }}{% else %}—{% endif %}
+        </td>
+        <td>
+          {% if it.status == 'accepted' %}<span class="badge ok">已排入</span>
+          {% else %}<span class="badge bad">已拒绝</span>{% endif %}
+        </td>
+        <td class="risks">
+          {% if it.risks %}
+          <ul class="reasons">
+            {% for risk in it.risks %}
+            <li class="{{ risk.level }}">
+              {{ risk_source_text(risk) }}<br>
+              <span class="action">
+                {% if risk.level == 'none' %}✅{% elif risk.level == 'mitigated' %}🧼{% else %}⚠️{% endif %}
+                {{ risk_action_text(risk) }}
+              </span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <span class="muted">无前置残留风险（首用器具或器具空闲）</span>
+          {% endif %}
+          {% if it.revision_note %}
+          <div class="revision-note">📝 {{ it.revision_note }}</div>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

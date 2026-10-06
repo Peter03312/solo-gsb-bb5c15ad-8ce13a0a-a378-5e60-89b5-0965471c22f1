@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}交接版 · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>生产交接版</h2>
+  <p class="hint">发布时按当前器具占用、过敏原与清洁规则重新计算排程；
+    没有批次或存在阻塞批次时拒绝发布、不生成版本。每次发布在同一事务内保存
+    连续版本号与按顺序排列的批次、器具、时段、过敏原、风险来源、所用清洁及状态快照；
+    之后修改或删除批次、器具、清洁记录均不影响已发布版本，历史版本可按原样查看与导出。</p>
+  <div class="toolbar">
+    <form method="post" action="{{ url_for('publish_release') }}"
+          onsubmit="return confirm('将按当前器具占用、过敏原与清洁规则重新计算；存在阻塞批次时不会生成版本。确认发布交接版？');">
+      <button class="btn" type="submit">📦 发布交接版</button>
+    </form>
+    <span class="hint">版本号连续递增；看板会同时显示实时排程与最新交接版的差异。</span>
+  </div>
+  {% if not releases %}
+  <p class="empty">暂无交接版。发布第一个交接版后，可在此查看版本历史。</p>
+  {% else %}
+  <table>
+    <thead><tr><th>版本</th><th>发布时间</th><th>批次数</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for rel in releases %}
+      <tr>
+        <td><strong>v{{ rel.version }}</strong>
+          {% if loop.first %}<span class="badge ok">最新</span>{% endif %}</td>
+        <td class="time">{{ rel.created_at.replace('T', ' ') }}</td>
+        <td>{{ rel.batch_count }}</td>
+        <td class="ops">
+          <a class="btn small" href="{{ url_for('release_detail', version=rel.version) }}">查看</a>
+          <a class="btn ghost small" href="{{ url_for('release_export_csv', version=rel.version) }}">CSV</a>
+          <a class="btn ghost small" href="{{ url_for('release_export_json', version=rel.version) }}">JSON</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

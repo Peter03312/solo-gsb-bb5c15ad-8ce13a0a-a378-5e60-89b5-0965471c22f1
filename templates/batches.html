@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}批次管理 · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>录入批次</h2>
+  {% if not equipment %}
+  <p class="empty">尚未登记器具，请先到 <a href="{{ url_for('equipment_page') }}">器具与清洁</a> 添加台面/器具。</p>
+  {% endif %}
+  <form method="post" class="grid-form">
+    <label>批次名称
+      <input type="text" name="name" required placeholder="如：花生酱曲奇">
+    </label>
+    <label>预计开始
+      <input type="datetime-local" name="planned_start" required>
+    </label>
+    <label>预计结束
+      <input type="datetime-local" name="planned_end" required>
+    </label>
+    <fieldset>
+      <legend>本批次过敏原</legend>
+      {% for a in allergen_options %}
+      <label class="check"><input type="checkbox" name="allergens" value="{{ a }}"> {{ a }}</label>
+      {% endfor %}
+    </fieldset>
+    <fieldset>
+      <legend>使用台面 / 器具</legend>
+      {% for e in equipment %}
+      <label class="check"><input type="checkbox" name="equipment" value="{{ e.id }}"> {{ e.name }}</label>
+      {% endfor %}
+    </fieldset>
+    <div class="form-actions"><button class="btn" type="submit">录入批次</button></div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>已录入批次（按排程顺序）</h2>
+  {% if not rows %}<p class="empty">暂无批次。</p>{% else %}
+  <table>
+    <thead><tr><th>#</th><th>名称</th><th>过敏原</th><th>器具</th><th>预计时段</th><th>过敏原修订</th><th></th></tr></thead>
+    <tbody>
+    {% for b in rows %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td><strong>{{ b.name }}</strong></td>
+        <td>{{ join_alg(b.allergens.split(',')|select('string')|map('trim')|select|list) }}</td>
+        <td>{{ (equip_of.get(b.id) or [])|join('、') or '—' }}</td>
+        <td class="time">{{ b.planned_start.replace('T', ' ') }} ~ {{ b.planned_end.replace('T', ' ') }}</td>
+        <td>
+          <details class="rev">
+            <summary>修改过敏原</summary>
+            <form method="post" action="{{ url_for('revise_allergens', bid=b.id) }}" class="rev-form">
+              {% set cur = b.allergens.split(',') %}
+              <fieldset>
+                <legend>新的过敏原集合</legend>
+                {% for a in allergen_options %}
+                <label class="check"><input type="checkbox" name="allergens" value="{{ a }}"
+                      {% if a in cur %}checked{% endif %}> {{ a }}</label>
+                {% endfor %}
+              </fieldset>
+              <label>变更原因（必填）
+                <input type="text" name="reason" required placeholder="如：供应商确认原料不含大豆">
+              </label>
+              <label>变更时间（必填）
+                <input type="datetime-local" name="changed_at" required>
+              </label>
+              <div><button class="btn small" type="submit">保存修订</button></div>
+            </form>
+          </details>
+        </td>
+        <td>
+          <form method="post" action="{{ url_for('delete_batch', bid=b.id) }}"
+                onsubmit="return confirm('确定删除批次「{{ b.name }}」？其过敏原修订记录将一并删除。');">
+            <button class="btn danger small" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>配方过敏原修订记录</h2>
+  <p class="hint">修改批次过敏原必须填写变更原因与时间；删除批次后其修订记录一并删除。</p>
+  {% if not revisions %}<p class="empty">暂无修订记录。</p>{% else %}
+  <table>
+    <thead><tr><th>#</th><th>批次</th><th>变更时间</th><th>修改前</th><th>修改后</th><th>变更原因</th></tr></thead>
+    <tbody>
+    {% for rev in revisions %}
+      <tr>
+        <td>{{ rev.id }}</td>
+        <td><strong>{{ rev.batch_name }}</strong></td>
+        <td class="time">{{ rev.changed_at.replace('T', ' ') }}</td>
+        <td>{{ join_alg(rev.old_allergens.split(',')|select('string')|map('trim')|select|list) }}</td>
+        <td>{{ join_alg(rev.new_allergens.split(',')|select('string')|map('trim')|select|list) }}</td>
+        <td>{{ rev.reason }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<script>
+// 变更时间默认填入当前时间（操作者可按需修改）
+document.querySelectorAll('input[name="changed_at"]').forEach(function (el) {
+  if (!el.value) {
+    var d = new Date();
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    el.value = d.toISOString().slice(0, 16);
+  }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,17 @@
+services:
+  web:
+    build: .
+    container_name: allergen-scheduler
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      APP_URL: "http://localhost:8000"
+      # SECRET_KEY: "please-change-me"
+      # DB_PATH: "/app/data/scheduler.db"
+    volumes:
+      - scheduler-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  scheduler-data:

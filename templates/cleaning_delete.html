@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}删除清洁记录 · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>删除清洁记录 #{{ cleaning.id }}</h2>
+  <p class="hint">
+    <a href="{{ url_for('equipment_page') }}">← 返回器具与清洁</a>
+    （取消操作不会改动任何数据）
+  </p>
+
+  <table class="delete-meta">
+    <tbody>
+      <tr><th>器具</th><td>{{ cleaning.equipment_name }}</td></tr>
+      <tr><th>清洁时间</th><td class="time">{{ cleaning.cleaned_at.replace('T', ' ') }}</td></tr>
+      <tr><th>有效至</th><td class="time">{{ cleaning.valid_until.replace('T', ' ') }}</td></tr>
+      <tr><th>覆盖范围</th>
+        <td>{% if cleaning.covers == '*' %}<span class="badge ok">全部过敏原</span>
+            {% else %}{{ cleaning.covers.replace(',', '、') }}{% endif %}</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>删除影响预览（按当前排程计算）</h2>
+  {% if not affected %}
+  <p class="empty">当前排程中没有批次会因删除该记录而变为阻塞。删除后排程结果不变。</p>
+  {% else %}
+  <p class="hint">以下 {{ affected|length }} 个批次将由“已排入{% if affected|selectattr('mitigated_here')|list %}（含风险已缓解）{% endif %}”变为阻塞：</p>
+  <ul class="affected-list">
+    {% for a in affected %}
+    <li>
+      <div class="affected-head">
+        <strong>{{ a.batch_name }}</strong>
+        <span class="muted">器具：{{ a.equipment_names|join('、') }}</span>
+        <span class="badge ok">{{ a.prev_status }}</span> → <span class="badge bad">{{ a.new_status }}</span>
+      </div>
+      {% for m in a.mitigated_here %}
+      <div class="affected-mit">🧼 {{ m.summary }} —— 删除后不再有清洁覆盖</div>
+      {% endfor %}
+      <ul class="reasons">
+        {% for reason in a.block_reasons %}
+        <li class="block">⛔ {{ reason }}</li>
+        {% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="hint">删除后看板会按现有规则重新计算；后续调整顺序或补登清洁后，这些批次可重新排入。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>确认删除</h2>
+  <form method="post" class="delete-form">
+    <label>删除原因（必填）
+      <textarea name="reason" rows="3" required
+        placeholder="如：该清洁登记有误，实际未执行；将在清洁后重新登记">{{ reason_value }}</textarea>
+    </label>
+    <div class="form-actions">
+      <button class="btn danger" type="submit">确认删除并留档</button>
+      <a class="btn ghost" href="{{ url_for('equipment_page') }}">取消</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

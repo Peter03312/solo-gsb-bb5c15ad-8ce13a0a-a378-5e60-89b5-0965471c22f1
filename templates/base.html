@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}共享厨房过敏原排程{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="wrap head-row">
+    <h1>🍳 共享厨房过敏原交叉污染排程</h1>
+    <div class="access">访问地址：<a href="{{ app_url }}">{{ app_url }}</a>
+      <span class="port">端口 {{ port }}</span></div>
+  </div>
+  <nav class="wrap">
+    <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">排程看板</a>
+    <a href="{{ url_for('batches') }}" class="{{ 'active' if request.endpoint == 'batches' }}">批次管理</a>
+    <a href="{{ url_for('equipment_page') }}" class="{{ 'active' if request.endpoint == 'equipment_page' }}">器具与清洁</a>
+  </nav>
+</header>
+<main class="wrap">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in messages %}
+      <div class="flash {{ cat }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="wrap">
+  共享厨房过敏原排程系统 · 本机访问 <strong>{{ app_url }}</strong> ·
+  数据存储于 SQLite · 规则：切换过敏原前必须有覆盖全部残留源且在有效期内的清洁
+</footer>
+</body>
+</html>

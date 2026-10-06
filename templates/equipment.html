@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}器具与清洁 · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<div class="two-col">
+  <section class="panel">
+    <h2>台面 / 器具</h2>
+    <form method="post" class="inline-form">
+      <input type="text" name="name" required placeholder="如：台面C、和面机">
+      <button class="btn" type="submit">添加器具</button>
+    </form>
+    {% if not equipment %}<p class="empty">暂无器具。</p>{% else %}
+    <table>
+      <thead><tr><th>ID</th><th>名称</th><th></th></tr></thead>
+      <tbody>
+      {% for e in equipment %}
+        <tr>
+          <td>{{ e.id }}</td>
+          <td><strong>{{ e.name }}</strong></td>
+          <td>
+            <form method="post" action="{{ url_for('delete_equipment', eid=e.id) }}"
+                  onsubmit="return confirm('删除器具「{{ e.name }}」将同时移除其清洁记录与批次关联，确定？');">
+              <button class="btn danger small" type="submit">删除</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>登记清洁记录</h2>
+    {% if not equipment %}
+    <p class="empty">请先添加器具。</p>
+    {% else %}
+    <form method="post" action="{{ url_for('add_cleaning') }}" class="grid-form">
+      <label>器具
+        <select name="equipment_id" required>
+          {% for e in equipment %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>清洁时间
+        <input type="datetime-local" name="cleaned_at" required>
+      </label>
+      <label>有效至
+        <input type="datetime-local" name="valid_until" required>
+      </label>
+      <fieldset>
+        <legend>清洁覆盖的过敏原</legend>
+        <label class="check"><input type="checkbox" name="cover_all" value="1"> <strong>全部过敏原</strong></label>
+        {% for a in allergen_options %}
+        <label class="check"><input type="checkbox" name="covers" value="{{ a }}"> {{ a }}</label>
+        {% endfor %}
+      </fieldset>
+      <div class="form-actions"><button class="btn" type="submit">登记清洁</button></div>
+    </form>
+    {% endif %}
+  </section>
+</div>
+
+<section class="panel">
+  <h2>清洁记录</h2>
+  <p class="hint">删除前会按当前排程计算受影响批次（由“已排入/风险已缓解”转为阻塞的批次及原因），
+    需填写删除原因并确认；删除时间、原因与受影响批次快照会留档，可在排程看板与导出中查询。</p>
+  {% if not cleanings %}<p class="empty">暂无清洁记录。</p>{% else %}
+  <table>
+    <thead><tr><th>ID</th><th>器具</th><th>清洁时间</th><th>有效至</th><th>覆盖范围</th><th></th></tr></thead>
+    <tbody>
+    {% for c in cleanings %}
+      <tr>
+        <td>{{ c.id }}</td>
+        <td>{{ c.equipment_name }}</td>
+        <td class="time">{{ c.cleaned_at.replace('T', ' ') }}</td>
+        <td class="time">{{ c.valid_until.replace('T', ' ') }}</td>
+        <td>{% if c.covers == '*' %}<span class="badge ok">全部过敏原</span>{% else %}{{ c.covers.replace(',', '、') }}{% endif %}</td>
+        <td>
+          <a class="btn danger small"
+             href="{{ url_for('delete_cleaning', cid=c.id) }}">删除</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

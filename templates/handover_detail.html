@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}交接版 v{{ h.version_no }} · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<section class="panel frozen-banner">
+  <div class="handover-head">
+    <h2>生产交接版 v{{ h.version_no }}
+      <span class="muted">发布于 {{ h.published_at.replace('T', ' ') }} · {{ h.batch_count }} 个批次</span>
+    </h2>
+    <div class="handover-links">
+      <a class="btn small ghost" href="{{ url_for('handover_list') }}">全部版本</a>
+      <a class="btn small ghost" href="{{ url_for('handover_export_csv', version_no=h.version_no) }}">⬇ 导出该版 CSV</a>
+      <a class="btn small ghost" href="{{ url_for('handover_export_json', version_no=h.version_no) }}">⬇ 导出该版 JSON</a>
+    </div>
+  </div>
+  <p class="hint">🔒 本页为发布时在同一事务内冻结的快照：批次顺序、器具、时段、过敏原、
+    风险来源、所用清洁与状态均按发布时原样保存。此后批次、器具或清洁记录被修改或删除，
+    本页与上述导出均不变化；看板实时排程与实时导出仍按当前数据计算。</p>
+</section>
+
+<section class="panel">
+  <h2>批次顺序与判定（快照）</h2>
+  <table class="schedule">
+    <thead>
+      <tr><th>#</th><th>批次 / 过敏原</th><th>器具</th><th>时段</th>
+        <th>状态</th><th>现状</th><th>风险来源与处置</th></tr>
+    </thead>
+    <tbody>
+    {% for b in h.snapshot.batches %}
+      <tr class="{{ b.status }}">
+        <td>{{ b.order }}</td>
+        <td>
+          <strong>{{ b.name }}</strong><br>
+          <span class="tags">
+            {% for a in b.allergens %}<span class="tag">{{ a }}</span>
+            {% else %}<span class="tag none">无过敏原</span>{% endfor %}
+          </span>
+        </td>
+        <td>{{ b.equipment_names|join('、') if b.equipment_names else '—' }}</td>
+        <td class="time">{{ b.planned_start.replace('T', ' ')[5:] }} ~ {{ b.planned_end[-5:] }}</td>
+        <td>
+          {% if b.status == 'accepted' %}<span class="badge ok">已排入</span>
+          {% else %}<span class="badge bad">已拒绝</span>{% endif %}
+        </td>
+        <td class="diff-cell">
+          {% if b.batch_id in current_ids %}<span class="muted">批次仍在实时排程</span>
+          {% else %}<span class="badge removed">批次此后已删除</span>{% endif %}
+        </td>
+        <td class="risks">
+          {% if b.status == 'blocked' %}
+          <ul class="reasons">
+            {% for reason in b.blocks %}<li class="block">⛔ {{ reason }}</li>{% endfor %}
+          </ul>
+          {% endif %}
+          {% set shown = b.risks if b.status != 'blocked' else b.risks|selectattr('level', 'ne', 'blocked')|list %}
+          {% if shown %}
+          <ul class="reasons">
+            {% for risk in shown %}
+            <li class="{{ risk.level }}">
+              {{ risk_source_text(risk) }}<br>
+              <span class="action">
+                {% if risk.level == 'none' %}✅{% elif risk.level == 'mitigated' %}🧼{% else %}⚠️{% endif %}
+                {{ risk_action_text(risk) }}
+              </span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% elif b.status == 'accepted' %}
+          <span class="muted">无前置残留风险（首用器具或器具空闲）</span>
+          {% endif %}
+          {% if b.revision_note %}<div class="revision-note">📝 {{ b.revision_note }}</div>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>所用清洁记录（快照）</h2>
+  {% if not h.snapshot.cleanings_used %}
+  <p class="empty">本交接版判定中没有引用任何清洁记录。</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>原记录ID</th><th>器具</th><th>清洁时间</th><th>有效至</th><th>覆盖范围</th></tr>
+    </thead>
+    <tbody>
+    {% for c in h.snapshot.cleanings_used %}
+      <tr>
+        <td>#{{ c.id }}</td>
+        <td>{{ c.equipment_name }}</td>
+        <td class="time">{{ c.cleaned_at.replace('T', ' ')[5:] }}</td>
+        <td class="time">{{ c.valid_until.replace('T', ' ')[5:] }}</td>
+        <td>{% if c.covers == '*' %}<span class="badge ok">全部过敏原</span>
+          {% else %}{{ c.covers.replace(',', '、') }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>器具清单（发布时快照）</h2>
+  <p class="hint">
+    {% for e in h.snapshot.equipment %}<span class="tag">{{ e.name }}</span> {% endfor %}
+    {% if not h.snapshot.equipment %}<span class="empty">发布时无器具记录。</span>{% endif %}
+  </p>
+</section>
+
+<p><a class="btn ghost" href="{{ url_for('index') }}">← 返回排程看板（实时排程）</a></p>
+{% endblock %}

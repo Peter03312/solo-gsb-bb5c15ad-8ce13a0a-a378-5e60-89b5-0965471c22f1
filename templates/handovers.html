@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}生产交接版本 · 共享厨房过敏原排程{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>生产交接版本</h2>
+  <p class="hint">每次发布在同一事务内按当时的器具占用、过敏原与清洁规则重新计算，
+    并冻结连续版本号及有序的批次、器具、时段、过敏原、风险来源、所用清洁与状态快照。
+    历史版本可随时按发布时的原样查看与导出，不受此后批次/器具/清洁修改或删除的影响。</p>
+  <form method="post" action="{{ url_for('publish_handover_route') }}">
+    <button class="btn publish" type="submit">📌 发布新的生产交接版</button>
+    <a class="btn ghost" href="{{ url_for('index') }}">返回排程看板</a>
+  </form>
+  {% if not handovers %}
+  <p class="empty" style="margin-top:14px">尚未发布任何交接版。请先在看板确认所有批次均可排入后再发布。</p>
+  {% else %}
+  <table style="margin-top:14px">
+    <thead>
+      <tr><th>版本</th><th>发布时间</th><th>批次数</th><th>所用清洁记录数</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for hv in handovers %}
+      <tr>
+        <td><strong>v{{ hv.version_no }}</strong>
+          {% if loop.first %}<span class="badge same">最新</span>{% endif %}</td>
+        <td class="time">{{ hv.published_at.replace('T', ' ') }}</td>
+        <td>{{ hv.batch_count }}</td>
+        <td>{{ hv.cleaning_used_count }}</td>
+        <td class="handover-op">
+          <a class="btn small" href="{{ url_for('handover_detail', version_no=hv.version_no) }}">查看</a>
+          <a class="btn small ghost" href="{{ url_for('handover_export_csv', version_no=hv.version_no) }}">CSV</a>
+          <a class="btn small ghost" href="{{ url_for('handover_export_json', version_no=hv.version_no) }}">JSON</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

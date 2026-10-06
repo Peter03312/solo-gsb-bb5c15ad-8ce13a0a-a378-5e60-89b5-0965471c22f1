@@ -84,6 +84,25 @@ tr.blocked td { background: #fff7f7; }
 .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; white-space: nowrap; }
 .badge.ok { background: var(--ok-bg); color: var(--ok); }
 .badge.bad { background: var(--bad-bg); color: var(--bad); }
+.badge.added { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+.badge.removed { background: #f3f4f6; color: #4b5563; border: 1px solid #d1d5db; }
+.badge.changed { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; }
+.badge.same { background: #f1f5f9; color: #64748b; }
+
+.btn.publish { background: #7c3aed; }
+.diff-cell { font-size: 12.5px; }
+
+.handover-panel { border-left: 4px solid #7c3aed; }
+.handover-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.handover-head h2 { margin: 0; }
+.handover-ver {
+  background: #ede9fe; color: #6d28d9; border-radius: 6px; padding: 2px 10px;
+  font-size: 14px; margin: 0 6px;
+}
+.handover-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.handover-op { white-space: nowrap; }
+.handover-op .btn { margin-right: 4px; }
+.frozen-banner { border-left: 4px solid #0891b2; }
 
 .tags { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .tag {

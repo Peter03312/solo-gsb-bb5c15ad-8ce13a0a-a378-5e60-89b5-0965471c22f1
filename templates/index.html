@@ -11,11 +11,14 @@
   <form method="post" action="{{ url_for('recalculate') }}">
     <button class="btn" type="submit">⟳ 重新计算</button>
   </form>
+  <form method="post" action="{{ url_for('publish_handover_route') }}">
+    <button class="btn publish" type="submit" title="按当前器具占用、过敏原与清洁规则重新计算；无阻塞批次时冻结为连续编号的生产交接版">📌 发布生产交接版</button>
+  </form>
   <a class="btn ghost" href="{{ url_for('export_csv') }}">⬇ 导出 CSV</a>
   <a class="btn ghost" href="{{ url_for('export_json') }}">⬇ 导出 JSON</a>
   <a class="btn ghost" href="{{ url_for('export_cleaning_deletions_csv') }}">🧾 删除记录 CSV</a>
   <a class="btn ghost" href="{{ url_for('export_cleaning_deletions_json') }}">🧾 删除记录 JSON</a>
-  <span class="hint">用 ↑↓ 调整顺序后自动重新计算；被阻塞批次不占用器具，阻塞原因保留在“风险来源”列。</span>
+  <span class="hint">用 ↑↓ 调整顺序后自动重新计算；被阻塞批次不占用器具，阻塞原因保留在“风险来源”列。发布交接版会冻结当时快照，历史版本不受后续修改影响。</span>
 </div>
 
 {% if not results %}
@@ -25,7 +28,7 @@
   <thead>
     <tr>
       <th>#</th><th>批次 / 过敏原</th><th>器具</th><th>预计时段</th>
-      <th>状态</th><th>风险来源与处置</th><th>顺序</th>
+      <th>状态</th><th>相对最新交接版</th><th>风险来源与处置</th><th>顺序</th>
     </tr>
   </thead>
   <tbody>
@@ -46,6 +49,12 @@
       <td>
         {% if r.status == 'accepted' %}<span class="badge ok">已排入</span>
         {% else %}<span class="badge bad">已拒绝</span>{% endif %}
+      </td>
+      <td class="diff-cell">
+        {% if not latest %}<span class="muted">—</span>
+        {% elif r.id in diffs and diffs[r.id].kind == 'added' %}<span class="badge added">新增</span>
+        {% elif r.id in diffs and diffs[r.id].kind == 'changed' %}<span class="badge changed" title="变化字段：{{ diffs[r.id].fields|join('、') }}">内容变化 · {{ diffs[r.id].fields|join('、') }}</span>
+        {% else %}<span class="badge same">同 v{{ latest.version_no }}</span>{% endif %}
       </td>
       <td class="risks">
         {% if r.status == 'blocked' %}
@@ -86,6 +95,91 @@
   </tbody>
 </table>
 {% endif %}
+
+<section class="panel handover-panel">
+  <div class="handover-head">
+    <h2>最新生产交接版
+      {% if latest %}<span class="handover-ver">v{{ latest.version_no }}</span>
+      <span class="muted">发布于 {{ latest.published_at.replace('T', ' ') }} · {{ latest.batch_count }} 个批次</span>{% endif %}
+    </h2>
+    {% if latest %}
+    <div class="handover-links">
+      <a class="btn small ghost" href="{{ url_for('handover_detail', version_no=latest.version_no) }}">查看冻结快照</a>
+      <a class="btn small ghost" href="{{ url_for('handover_list') }}">全部版本</a>
+      <a class="btn small ghost" href="{{ url_for('handover_export_csv', version_no=latest.version_no) }}">⬇ 该版 CSV</a>
+      <a class="btn small ghost" href="{{ url_for('handover_export_json', version_no=latest.version_no) }}">⬇ 该版 JSON</a>
+    </div>
+    {% endif %}
+  </div>
+  {% if not latest %}
+  <p class="empty">尚未发布生产交接版。确认上方实时排程无被阻塞批次后，点击「📌 发布生产交接版」即可冻结为 v1；
+    发布后历史版本即使在批次/器具/清洁被修改或删除后仍可按原样查看与导出。</p>
+  {% else %}
+  <p class="hint">下表为 v{{ latest.version_no }} 发布时冻结的快照；右侧标记表示其与<b>当前实时排程</b>的差异
+    （新增：实时排程新出现；移除：发布后该批次已从实时排程删除；内容变化：名称/过敏原/器具/时段/状态/所用清洁有改动）。</p>
+  <table class="schedule">
+    <thead>
+      <tr><th>#</th><th>批次 / 过敏原</th><th>器具</th><th>发布时时段</th>
+        <th>发布时状态</th><th>与当前排程对比</th><th>风险来源与处置（快照）</th></tr>
+    </thead>
+    <tbody>
+    {% for b in latest.snapshot.batches %}
+      <tr class="{{ b.status }}">
+        <td>{{ b.order }}</td>
+        <td>
+          <strong>{{ b.name }}</strong><br>
+          <span class="tags">
+            {% for a in b.allergens %}<span class="tag">{{ a }}</span>
+            {% else %}<span class="tag none">无过敏原</span>{% endfor %}
+          </span>
+        </td>
+        <td>{{ b.equipment_names|join('、') if b.equipment_names else '—' }}</td>
+        <td class="time">{{ b.planned_start.replace('T', ' ')[5:] }} ~ {{ b.planned_end[-5:] }}</td>
+        <td>
+          {% if b.status == 'accepted' %}<span class="badge ok">已排入</span>
+          {% else %}<span class="badge bad">已拒绝</span>{% endif %}
+        </td>
+        <td class="diff-cell">
+          {% set d = diffs.get(b.batch_id) %}
+          {% if b.batch_id in removed_ids %}<span class="badge removed">已移除</span>
+          {% elif d and d.kind == 'changed' %}
+          <span class="badge changed" title="变化字段：{{ d.fields|join('、') }}">内容变化 · {{ d.fields|join('、') }}</span>
+          {% else %}<span class="badge same">当前一致</span>{% endif %}
+        </td>
+        <td class="risks">
+          {% if b.status == 'blocked' %}
+          <ul class="reasons">
+            {% for reason in b.blocks %}<li class="block">⛔ {{ reason }}</li>{% endfor %}
+          </ul>
+          {% endif %}
+          {% set shown = b.risks if b.status != 'blocked' else b.risks|selectattr('level', 'ne', 'blocked')|list %}
+          {% if shown %}
+          <ul class="reasons">
+            {% for risk in shown %}
+            <li class="{{ risk.level }}">
+              {{ risk_source_text(risk) }}<br>
+              <span class="action">
+                {% if risk.level == 'none' %}✅{% elif risk.level == 'mitigated' %}🧼{% else %}⚠️{% endif %}
+                {{ risk_action_text(risk) }}
+              </span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% elif b.status == 'accepted' %}
+          <span class="muted">无前置残留风险（首用器具或器具空闲）</span>
+          {% endif %}
+          {% if b.revision_note %}<div class="revision-note">📝 {{ b.revision_note }}</div>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% set added_now = diffs.values()|selectattr('kind', 'equalto', 'added')|list %}
+  {% if added_now %}
+  <p class="hint">另有 {{ added_now|length }} 个<b>新增</b>批次只存在于上方实时排程，尚未进入任何交接版。</p>
+  {% endif %}
+  {% endif %}
+</section>
 
 <section class="panel deletion-log">
   <h2>清洁记录删除留档</h2>

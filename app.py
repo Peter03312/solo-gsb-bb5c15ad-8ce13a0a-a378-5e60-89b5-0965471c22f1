@@ -18,7 +18,7 @@ import os
 import sqlite3
 from datetime import datetime
 
-from flask import (Flask, Response, flash, g, redirect, render_template,
+from flask import (Flask, Response, abort, flash, g, redirect, render_template,
                    request, url_for)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +74,13 @@ CREATE TABLE IF NOT EXISTS cleaning_deletion (
     deleted_at TEXT NOT NULL,
     affected TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS handover_version (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_no INTEGER NOT NULL UNIQUE,
+    published_at TEXT NOT NULL,
+    batch_count INTEGER NOT NULL,
+    snapshot TEXT NOT NULL
+);
 """
 
 app = Flask(__name__)
@@ -84,9 +91,10 @@ app.secret_key = os.environ.get("SECRET_KEY", "allergen-scheduler-dev-key")
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=10)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
+        g.db.execute("PRAGMA busy_timeout = 10000")
     return g.db
 
 
@@ -387,6 +395,255 @@ def cleaning_deletion_rows(conn):
     return rows
 
 
+# -------------------------------------------------------- 生产交接版（发布/快照）
+
+def _iso(dt):
+    return dt.isoformat(timespec="minutes") if dt else ""
+
+
+def _snapshot_risk(risk):
+    """把 compute_schedule 的单条风险结构转为可 JSON 化的快照（清洗对象单独拍平）。"""
+    snap = {
+        "equipment": risk["equipment"],
+        "from_batch": risk["from_batch"],
+        "residual": list(risk["residual"]),
+        "new_risks": list(risk["new_risks"]),
+        "level": risk["level"],
+        "block_reason": risk["block_reason"],
+        "cleaning": None,
+    }
+    c = risk.get("cleaning")
+    if c:
+        snap["cleaning"] = {
+            "id": c["id"], "equipment_id": c.get("equipment_id"),
+            "cleaned_at": c["cleaned_at"], "valid_until": c["valid_until"],
+            "covers": c["covers"],
+        }
+    return snap
+
+
+def build_handover_snapshot(conn, results, version_no, published_at):
+    """按排程结果生成自包含的交接版快照。
+
+    快照只依赖传入的 results（同一事务内算出），并额外读取发布时刻的器具与
+    所用清洁记录；批次的时段、过敏原、风险来源、清洁依据、修订说明与状态均
+    逐批拷贝进 snapshot，此后批次/器具/清洁被修改或删除都不影响历史版本。
+    """
+    cleaning_ids = set()
+    for r in results:
+        for risk in r["risks"]:
+            if risk.get("cleaning"):
+                cleaning_ids.add(risk["cleaning"]["id"])
+    cleanings_used = {}
+    if cleaning_ids:
+        placeholders = ",".join("?" * len(cleaning_ids))
+        for c in conn.execute(
+                f"SELECT c.*, e.name AS equipment_name FROM cleaning c"
+                f" LEFT JOIN equipment e ON e.id = c.equipment_id"
+                f" WHERE c.id IN ({placeholders})",
+                tuple(cleaning_ids)):
+            cleanings_used[c["id"]] = {
+                "id": c["id"], "equipment_id": c["equipment_id"],
+                "equipment_name": c["equipment_name"] or f"#{c['equipment_id']}",
+                "cleaned_at": c["cleaned_at"], "valid_until": c["valid_until"],
+                "covers": c["covers"],
+            }
+    batches = []
+    for i, r in enumerate(results, 1):
+        batches.append({
+            "order": i,
+            "batch_id": r["id"],
+            "name": r["name"],
+            "allergens": list(r["allergens"]),
+            "equipment_names": list(r["equipment_names"]),
+            "planned_start": _iso(r["start"]),
+            "planned_end": _iso(r["end"]),
+            "status": r["status"],
+            "blocks": list(r["blocks"]),
+            "risks": [_snapshot_risk(risk) for risk in r["risks"]],
+            "revision_note": revision_note_text(r.get("latest_revision")),
+            "cleaning_ids": sorted(
+                risk["cleaning"]["id"] for risk in r["risks"]
+                if risk.get("cleaning")),
+        })
+    return {
+        "version_no": version_no,
+        "published_at": published_at,
+        "app_url": APP_URL,
+        "batch_count": len(batches),
+        "equipment": [{"id": r["id"], "name": r["name"]}
+                      for r in conn.execute("SELECT id, name FROM equipment ORDER BY id")],
+        "cleanings_used": [cleanings_used[cid]
+                           for cid in sorted(cleanings_used)],
+        "batches": batches,
+    }
+
+
+def publish_handover(conn):
+    """发布生产交接版：重新计算 → 校验 → 同一写事务内落连续版本号与快照。
+
+    返回 (handover_row 或 None, results, reject_reasons)。
+    整个流程在 BEGIN IMMEDIATE 写事务内完成：拿到写锁后再读数据、跑排程引擎，
+    保证快照内容与判定依据来自完全一致的同一数据状态，并发写入只能在事务前
+    排队或触发锁错误（此时不生成任何版本，由调用方提示重试）。
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        results = compute_schedule(conn)
+        reasons = []
+        if not results:
+            reasons.append("当前没有任何批次，排程为空，无法发布生产交接版")
+        blocked = [r for r in results if r["status"] != "accepted"]
+        if blocked:
+            names = "、".join(f"「{r['name']}」" for r in blocked)
+            reasons.append(f"存在 {len(blocked)} 个被阻塞批次（{names}），"
+                           f"请先消除阻塞再发布")
+            for r in blocked:
+                for b in r["blocks"]:
+                    reasons.append(f"批次「{r['name']}」：{b}")
+        if reasons:
+            conn.rollback()
+            return None, results, reasons
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no"
+            " FROM handover_version").fetchone()
+        version_no = row["next_no"]
+        published_at = datetime.now().isoformat(timespec="seconds")
+        snapshot = build_handover_snapshot(
+            conn, results, version_no, published_at)
+        cur = conn.execute(
+            "INSERT INTO handover_version"
+            "(version_no, published_at, batch_count, snapshot)"
+            " VALUES (?,?,?,?)",
+            (version_no, published_at, len(results),
+             json.dumps(snapshot, ensure_ascii=False)))
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM handover_version WHERE id=?",
+            (cur.lastrowid,)).fetchone()
+        return row, results, []
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _load_snapshot(raw):
+    return json.loads(raw or "{}")
+
+
+def list_handovers(conn):
+    rows = conn.execute(
+        "SELECT * FROM handover_version ORDER BY version_no DESC").fetchall()
+    out = []
+    for r in rows:
+        snap = _load_snapshot(r["snapshot"])
+        out.append({"id": r["id"], "version_no": r["version_no"],
+                    "published_at": r["published_at"],
+                    "batch_count": r["batch_count"],
+                    "cleaning_used_count": len(snap.get("cleanings_used", []))})
+    return out
+
+
+def load_handover(conn, version_no):
+    r = conn.execute(
+        "SELECT * FROM handover_version WHERE version_no=?",
+        (version_no,)).fetchone()
+    if r is None:
+        return None
+    return {"id": r["id"], "version_no": r["version_no"],
+            "published_at": r["published_at"],
+            "batch_count": r["batch_count"],
+            "snapshot": _load_snapshot(r["snapshot"])}
+
+
+def latest_handover(conn):
+    r = conn.execute(
+        "SELECT * FROM handover_version ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if r is None:
+        return None
+    return {"id": r["id"], "version_no": r["version_no"],
+            "published_at": r["published_at"],
+            "batch_count": r["batch_count"],
+            "snapshot": _load_snapshot(r["snapshot"])}
+
+
+def _used_cleaning_ids(r):
+    if "cleaning_ids" in r:  # 历史快照
+        return list(r.get("cleaning_ids") or [])
+    return sorted({risk["cleaning"]["id"] for risk in r.get("risks", [])
+                   if risk.get("cleaning")})
+
+
+DIFF_FIELDS = [
+    ("name", "名称"), ("allergens", "过敏原"), ("equipment_names", "器具"),
+    ("planned_start", "开始时间"), ("planned_end", "结束时间"),
+    ("status", "状态"), ("cleaning_ids", "所用清洁"),
+]
+
+
+def diff_against_latest(results, latest):
+    """实时排程与最新交接版按批次比对，返回 {batch_id: 变化说明}。
+
+    标记新增（最新版中没有的批次 id）、内容变化（关键字段不同，附字段名）；
+    最新版中存在、实时排程已没有的批次由调用方根据快照 id 集合标为移除。
+    """
+    if latest is None:
+        return {}
+    old = {b["batch_id"]: b for b in latest["snapshot"]["batches"]}
+    diffs = {}
+    for r in results:
+        if r["id"] not in old:
+            diffs[r["id"]] = {"kind": "added", "fields": []}
+            continue
+        o = old[r["id"]]
+        new_fp = {
+            "name": r["name"],
+            "allergens": list(r["allergens"]),
+            "equipment_names": list(r["equipment_names"]),
+            "planned_start": _iso(r["start"]),
+            "planned_end": _iso(r["end"]),
+            "status": r["status"],
+            "cleaning_ids": _used_cleaning_ids(r),
+        }
+        old_fp = {k: o.get(k) for k, _ in DIFF_FIELDS}
+        changed = [label for k, label in DIFF_FIELDS if old_fp.get(k) != new_fp[k]]
+        if changed:
+            diffs[r["id"]] = {"kind": "changed", "fields": changed}
+    return diffs
+
+
+def handover_export_rows(snapshot):
+    """把历史交接版快照展开为与实时导出一致的行结构（供 CSV/JSON 导出）。"""
+    rows = []
+    for b in snapshot["batches"]:
+        base = {
+            "order": b["order"], "batch": b["name"],
+            "allergens": b["allergens"],
+            "equipment": b["equipment_names"],
+            "planned_start": b["planned_start"],
+            "planned_end": b["planned_end"],
+            "status": "已排入" if b["status"] == "accepted" else "已拒绝",
+        }
+        note = b.get("revision_note") or ""
+        if b["risks"]:
+            for risk in b["risks"]:
+                row = dict(base)
+                row["risk_source"] = risk_source_text(risk)
+                row["action"] = risk_action_text(risk)
+                if note:
+                    row["action"] = f"{row['action']}；{note}"
+                rows.append(row)
+        else:
+            base["risk_source"] = ("无前置残留" if b["status"] == "accepted"
+                                   else "—")
+            base["action"] = "；".join(b["blocks"]) if b["blocks"] else "无交叉污染风险"
+            if note:
+                base["action"] = f"{base['action']}；{note}"
+            rows.append(base)
+    return rows
+
+
 # ---------------------------------------------------------------- 页面路由
 
 @app.context_processor
@@ -400,12 +657,106 @@ def inject_globals():
 
 @app.route("/")
 def index():
-    results = compute_schedule(get_db())
+    conn = get_db()
+    results = compute_schedule(conn)
+    latest = latest_handover(conn)
+    diffs = diff_against_latest(results, latest)
+    live_ids = {r["id"] for r in results}
+    removed_ids = ({b["batch_id"] for b in latest["snapshot"]["batches"]}
+                   - live_ids) if latest else set()
     accepted = sum(1 for r in results if r["status"] == "accepted")
     return render_template("index.html", results=results,
                            accepted=accepted,
                            blocked_count=len(results) - accepted,
-                           cleaning_deletions=cleaning_deletion_rows(get_db()))
+                           cleaning_deletions=cleaning_deletion_rows(conn),
+                           latest=latest, diffs=diffs, removed_ids=removed_ids)
+
+
+@app.post("/handovers/publish")
+def publish_handover_route():
+    """把当前排程发布为连续编号、可追溯的生产交接版。
+
+    发布前按当前器具占用、过敏原残留与清洁规则重新计算；无批次或存在
+    阻塞批次时拒绝发布、说明原因且不生成版本。成功则在同一事务内保存
+    版本号与有序快照（批次/器具/时段/过敏原/风险来源/所用清洁/状态）。
+    """
+    conn = get_db()
+    try:
+        row, _results, reasons = publish_handover(conn)
+    except sqlite3.OperationalError as exc:
+        app.logger.warning("handover publish locked: %s", exc)
+        flash("当前有其他修改正在进行，为避免版本与判定依据不一致已拒绝发布，"
+              "请稍后重试", "error")
+        return redirect(url_for("index"))
+    if row is None:
+        for reason in reasons:
+            flash(f"未发布交接版：{reason}", "error")
+        return redirect(url_for("index"))
+    flash(f"生产交接版 v{row['version_no']} 已发布（{row['batch_count']} 个批次），"
+          f"快照与判定依据已在同一事务内冻结保存", "ok")
+    return redirect(url_for("handover_detail", version_no=row["version_no"]))
+
+
+@app.route("/handovers")
+def handover_list():
+    return render_template("handovers.html",
+                           handovers=list_handovers(get_db()))
+
+
+@app.route("/handovers/<int:version_no>")
+def handover_detail(version_no):
+    conn = get_db()
+    handover = load_handover(conn, version_no)
+    if handover is None:
+        abort(404)
+    current_ids = {r["id"] for r in conn.execute("SELECT id FROM batch")}
+    return render_template("handover_detail.html", h=handover,
+                           current_ids=current_ids)
+
+
+@app.route("/handovers/<int:version_no>/export.csv")
+def handover_export_csv(version_no):
+    h = load_handover(get_db(), version_no)
+    if h is None:
+        abort(404)
+    snapshot = h["snapshot"]
+    out = io.StringIO()
+    out.write("﻿")  # BOM，便于 Excel 识别中文
+    w = csv.writer(out)
+    w.writerow(["交接版本", "发布时间", "顺序", "批次", "本批次过敏原", "使用器具",
+                "计划开始", "计划结束", "状态", "风险来源", "处置 / 阻塞原因"])
+    meta = [f"v{snapshot['version_no']}", snapshot["published_at"].replace("T", " ")]
+    for row in handover_export_rows(snapshot):
+        w.writerow([*meta, row["order"], row["batch"], join_alg(row["allergens"]),
+                    "、".join(row["equipment"]), row["planned_start"].replace("T", " "),
+                    row["planned_end"].replace("T", " "), row["status"],
+                    row["risk_source"], row["action"]])
+    return Response(out.getvalue(), mimetype="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=handover_v{version_no}.csv"})
+
+
+@app.route("/handovers/<int:version_no>/export.json")
+def handover_export_json(version_no):
+    h = load_handover(get_db(), version_no)
+    if h is None:
+        abort(404)
+    snapshot = h["snapshot"]
+    payload = {
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "app_url": APP_URL,
+        "handover_version": snapshot["version_no"],
+        "published_at": snapshot["published_at"],
+        "batch_count": snapshot["batch_count"],
+        "equipment_snapshot": snapshot.get("equipment", []),
+        "cleanings_used": snapshot.get("cleanings_used", []),
+        "batches": snapshot["batches"],
+        "schedule": handover_export_rows(snapshot),
+    }
+    return Response(json.dumps(payload, ensure_ascii=False, indent=2),
+                    mimetype="application/json; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=handover_v{version_no}.json"})
 
 
 @app.post("/recalculate")
